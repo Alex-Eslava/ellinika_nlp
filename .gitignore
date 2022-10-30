@@ -1,0 +1,18 @@
+# Ignoring data folder
+data/*
+
+# Unwanted files
+*.zip
+*.gz
+*.pkl
+*.pickle
+*.csv
+*.xlsx
+
+# Boilerplate files
+.python_packages
+__pycache__
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+
