@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl # 0.8.1
 import evaluate
+import torch
 
 from numpy.random import RandomState
 from torch.utils.data import Dataset, Dataloader
@@ -281,7 +282,7 @@ class T5FineTuner(pl.LightningModule):
             callbacks=[LoggingCallback()]
         )
         # Training yay
-        model = T5FinetUNER(args)
+        model = T5FineTuner(args)
         trainer = pl.Trainer(**train_params)
         trainer.fit(model)
         model.model.save_pretrained(result_save_dir_path)
