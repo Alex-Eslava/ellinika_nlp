@@ -15,10 +15,10 @@ import evaluate
 import torch
 
 from numpy.random import RandomState
-from torch.utils.data import Dataset, Dataloader
+from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AdamW,
-    MT5forConditionalGeneration,
+    MT5ForConditionalGeneration,
     AutoTokenizer,
     get_linear_schedule_with_warmup,
     pipeline
@@ -26,23 +26,27 @@ from transformers import (
 
 class GenerativeDataset(Dataset):
     def __init__(self, tokenizer, data_dir, type_path, max_len=30):
-        self.path = os.path.join(data_dir, type_path = '.csv')
+        self.path = os.path.join(data_dir, type_path)
         
         # Hardcoded for QGen, TODO: rework to generic
         self.context = 'context'
-        self.target = 'question'
-        if type_path =='.csv':
+        self.target = 'target'
+        if '.csv' in type_path:
             self.data = pd.read_csv(self.path)
+        elif '.tsv' in type_path:
+            self.data = pd.read_csv(self.path, sep='\t')
+           
         self.max_len = max_len
         self.tokenizer = tokenizer
         self.inputs = []
         self.targets = []
+        self._build()
 
     def __len__(self):
         return len(self.inputs)
 
     
-    def __getitem__(self, index: Any):
+    def __getitem__(self, index):
         source_ids = self.inputs[index]['input_ids'].squeeze()
         target_ids = self.targets[index]['input_ids'].squeeze()
         src_mask = self.inputs[index]['attention_mask'].squeeze()
@@ -66,10 +70,12 @@ class GenerativeDataset(Dataset):
             self.inputs.append(tokenized_inputs)
             self.targets.append(tokenized_targets)
 
+            
 class T5FineTuner(pl.LightningModule):
     def __init__(self, hparams):
+        super(T5FineTuner, self).__init__()
         self.hparams = hparams
-        self.model = MT5forConditionalGeneration.from_pretrained(hparams.model_name_or_path)
+        self.model = MT5ForConditionalGeneration.from_pretrained(hparams.model_name_or_path)
         self.tokenizer = AutoTokenizer.from_pretrained(hparams.tokenizer_name_or_path)
 
     def is_logger(self):
@@ -149,7 +155,7 @@ class T5FineTuner(pl.LightningModule):
         return tqdm_dict
 
     def train_dataloader(self):
-        train_dataset = get_dataset(tokenizer=self.tokenizer, type_path='train', args=self.hparams)
+        train_dataset = get_dataset(tokenizer=self.tokenizer, type_path='train.tsv', args=self.hparams)
         dataloader = DataLoader(train_dataset, batch_size=self.hparams.train_batch_size, 
                                 drop_last=True, shuffle=True, num_workers=4)
         t_total = (
@@ -163,130 +169,130 @@ class T5FineTuner(pl.LightningModule):
         return dataloader
     
     def val_dataloader(self):
-        val_dataset = get_dataset(tokenizer=self.tokenizer, type_path='valid', args=self.hparams)
+        val_dataset = get_dataset(tokenizer=self.tokenizer, type_path='valid.tsv', args=self.hparams)
         return DataLoader(val_dataset, batch_size=self.hparams.eval_batch_size, num_workers=4)
 
-    logger = logging.getLogger(__name__)
 
-    class LoggingCallback(pl.Callback):
-        def on_validation_end(self, trainer, pl_module):
-            logger.info("---- Validation Results ----")
-            if pl_module.is_logger():
-                metrics = trainer.callback_metrics
+logger = logging.getLogger(__name__)
+
+class LoggingCallback(pl.Callback):
+    def on_validation_end(self, trainer, pl_module):
+        logger.info("---- Validation Results ----")
+        if pl_module.is_logger():
+            metrics = trainer.callback_metrics
+            for key in sorted(metrics):
+                if key not in ['log']:
+                    logger.info("{} = {}\n".format(key, str(metrics[key])))
+
+    def on_test_end(self, trainer, pl_module): 
+        logger.info("---- Test Results ----")
+        if pl_module.is_logger():
+            metrics = trainer.callback_metrics
+            output_test_results_filepath = os.path.join(pl_module.hparams.output_dir, 'test_results.txt')
+            with open(output_test_results_filepath, "w") as writer:
                 for key in sorted(metrics):
                     if key not in ['log']:
                         logger.info("{} = {}\n".format(key, str(metrics[key])))
 
-        def on_test_end(self, trainer, pl_module): 
-            logger.info("---- Test Results ----")
-            if pl_module.is_logger():
-                metrics = trainer.callback_metrics
-                output_test_results_filepath = os.path.join(pl_module.hparams.output_dir, 'test_results.txt')
-                with open(output_test_results_filepath, "w") as writer:
-                    for key in sorted(metrics):
-                        if key not in ['log']:
-                            logger.info("{} = {}\n".format(key, str(metrics[key])))
-                            writer.write("{} = {}\n".format(key, str(metrics[key])))
+                        
+def get_dataset(tokenizer, type_path, args):
+    return GenerativeDataset(tokenizer=tokenizer, data_dir=args.data_dir, type_path=type_path, max_len=args.max_seq_length)
 
-    def get_dataset(tokenizer, type_path, args):
-        return GenerativeDataset(tokenizer=tokenizer, data_dir=args.data_dir, type_path=type_path, max_len=args.max_seq_length)
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-    def set_seed(seed):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+def generate_output(inp_ids, attn_mask, model):
+    """
+    Props to this guy--> https huggingface co/blog/how-to-generate
+    """
+    output = model.generate(input_ids = inp_ids, 
+                            attention_mask=attn_mask,
+                            do_sample=True,
+                            max_length=50,
+                            top_p = 0.93,
+                            top_k = 50,
+                            num_return_sequences = 5,
+                            min_length = 3,
+                            temperature = 0.9,
+                            repetition_penalty = 1.2,
+                            length_penalty = 1.5,
+                            no_repeat_ngram_size = 2,
+                            num_beams = 4
+    )
+    decoded_output = [tokenizer.decode(out, skip_special_tokens=True, clean_up_tokenization_spaces=True) for out in output] 
+    return [clean_output.strip() for clean_output in decoded_output]
 
-    def generate_output(inp_ids, attn_mask, model):
-        """
-        Props to this guy--> https huggingface co/blog/how-to-generate
-        """
-        output = model.generate(input_ids = inp_ids, 
-                                attention_mask=attn_mask,
-                                do_sample=True,
-                                max_length=50,
-                                top_p = 0.93,
-                                top_k = 50,
-                                num_return_sequences = 5,
-                                min_length = 3,
-                                temperature = 0.9,
-                                repetition_penalty = 1.2,
-                                length_penalty = 1.5,
-                                no_repeat_ngram_size = 2,
-                                num_beams = 4
-        )
-        decoded_output = [tokenizer.decode(out, skip_special_tokens=True, clean_up_tokenization_spaces=True) for out in output] 
-        return [clean_output.strip() for clean_output in decoded_output]
+def t5_generate(input_text, model, tokenizer):
+    encoding = tokenizer.encode_plus(input_text, return_tensors='pt')
+    input_ids, attention_masks = encoding['input_ids'].to(device), encoding['attention_mask'].to(device)
+    output = generate_output(input_ids, attention_masks, model)
+    return output
 
-    def t5_generate(input_text, model, tokenizer):
-        encoding = tokenizer.encode_plus(input_text, return_tensors='pt')
-        input_ids, attention_masks = encoding['input_ids'].to(device), encoding['attention_mask'].to(device)
-        output = generate_output(input_ids, attention_masks, model)
-        return output
+if __name__ == "__main__":
 
-    if __name__ == "__main__":
+    config_path = 't5_train_config.yaml'
+    config = yaml.safe_load(open(config_path))
+    set_seed(config['seed'])
+    dataset_path = config['dataset_path']
+    interim_data_path = config['interim_path']
+    result_save_dir_path = config['output_path']
 
-        config_path = 't5_train_config.yaml'
-        config = yaml.safe_load(open(config_path))
-        set_seed(config['seed'])
-        dataset_path = config['dataset_path']
-        interim_data_path = config['interim_path']
-        result_save_dir_path = config['output_path']
+    args_dict = dict(
+        data_dir = interim_data_path,
+        output_dir = result_save_dir_path,
+        model_name_or_path = config['model_ckpt'],
+        tokenizer_name_or_path = config['model_ckpt'],
+        max_seq_length = config['train_args']['max_seq_length'],
+        learning_rate = config['train_args']['learning_rate'],
+        weight_decay = config['train_args']['weight_decay'],
+        adam_epsilon = config['train_args']['adam_epsilon'],
+        warmup_steps = config['train_args']['warmup_steps'],
+        train_batch_size = config['train_args']['train_batch_size'],
+        eval_batch_size = config['train_args']['eval_batch_size'],
+        num_train_epochs = config['train_args']['num_train_epochs'],
+        gradient_accumulation_steps = config['train_args']['gradient_accumulation_steps'],
+        n_gpu=config['n_gpus'],
+        early_stop_callback=False,
+        fp_16 = False, 
+        opt_level=config['train_args']['opt_level'],
+        max_grad_norm = 1.0,
+        seed=config['seed']
+    )
+    """ TODO: Store as TSV and include train test val + check if already exist
+    data = pd.read_csv(dataset_path, sep='\t')
+    train = data.sample(frac=0.8, random_state=RandomState())
+    test = data.loc[~data.index.isin(train.index)]
 
-        args_dict = dict(
-            data_dir = interim_data_path,
-            output_dir = result_save_dir_path,
-            model_name_or_path = config['model_ckpt'],
-            tokenizer_name_or_path = config['model_ckpt'],
-            max_seq_length = config['train_args']['max_seq_length'],
-            learning_rate = config['train_args']['learning_rate'],
-            weight_decay = config['train_args']['weight_decay'],
-            adam_epsilon = config['train_args']['adam_epsilon'],
-            warmup_steps = config['train_args']['warmup_steps'],
-            train_batch_size = config['train_args']['train_batch_size'],
-            eval_batch_size = config['train_args']['eval_batch_size'],
-            num_training_epochs = config['train_args']['num_training_epochs'],
-            gradient_accumulation_steps = config['train_args']['gradient_accumulation_steps'],
-            n_gpu=config['n_gpus'],
-            early_stop_callback=False,
-            fp_16 = False, 
-            opt_level=config['train_args']['opt_level'],
-            max_grad_norm = 1.0,
-            seed=config['seed']
-        )
-
-        # Couldn't be bothered to import sklearn U_U
-        data = pd.read_csv(dataset_path, sep='|')
-        train = data.sample(frac=0.8, random_state=RandomState())
-        test = data.loc[~data.index.isin(train.index)]
-
-        train_path = f"{interim_data_path}/train.csv"
-        test_path = f"{interim_data_path}/test.csv"
-        train.to_csv(train_path)
-        test.to_csv(test_path)
-
-        args = argparse.Namespace(**args_dict)
-        checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            period=1, filepath=args.output_dir, prefix='checkpoint', monitor='val_loss', mode='min', save_top_k=1
-        )
-        train_params = dict(
-            accumulate_grad_batches = args.gradient_accumulation_steps,
-            gpus = config['n_gpus'],
-            max_epochs = args.num_train_epochs,
-            early_stop_callback=False,
-            precision = 16 if args.fp_16 else 32,
-            amp_level=args.opt_level,
-            gradient_clip_val=args.max_grad_norm,
-            checkpoint_callback=checkpoint_callback,
-            callbacks=[LoggingCallback()]
-        )
-        # Training yay
-        model = T5FineTuner(args)
-        trainer = pl.Trainer(**train_params)
-        trainer.fit(model)
-        model.model.save_pretrained(result_save_dir_path)
-        model.tokenizer.save_pretrained(result_save_dir_path)
-        # TODO: Add BLEU metric
+    train_path = f"{interim_data_path}/train.csv"
+    test_path = f"{interim_data_path}/test.csv"
+    train.to_csv(train_path)
+    test.to_csv(test_path)
+    """
+    args = argparse.Namespace(**args_dict)
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        period=1, filepath=args.output_dir, prefix='checkpoint', monitor='val_loss', mode='min', save_top_k=1
+    )
+    train_params = dict(
+        accumulate_grad_batches = args.gradient_accumulation_steps,
+        gpus = config['n_gpus'],
+        max_epochs = args.num_train_epochs,
+        early_stop_callback=False,
+        precision = 16 if args.fp_16 else 32,
+        amp_level=args.opt_level,
+        gradient_clip_val=args.max_grad_norm,
+        checkpoint_callback=checkpoint_callback,
+        callbacks=[LoggingCallback()]
+    )
+    # Training yay
+    model = T5FineTuner(args)
+    trainer = pl.Trainer(**train_params)
+    trainer.fit(model)
+    model.model.save_pretrained(result_save_dir_path)
+    model.tokenizer.save_pretrained(result_save_dir_path)
+    # TODO: Add BLEU metric
 
 
