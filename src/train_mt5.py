@@ -227,7 +227,7 @@ class T5FineTuner(pl.LightningModule):
 
     if __name__ == "__main__":
 
-        config_path = 'qgen_config.yaml'
+        config_path = 't5_train_config.yaml'
         config = yaml.safe_load(open(config_path))
         set_seed(config['seed'])
         dataset_path = config['dataset_path']

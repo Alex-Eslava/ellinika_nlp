@@ -1,0 +1,20 @@
+model_name: 'mt5_ca_el_translator'
+output_path: '../models/mt5_ca_el_translator'
+interim_path: '../data/interim/mt5_train_interim'
+dataset_path: '../data/interim/opus_corpus'
+model_type: 'mt5'
+model_ckpt: 'google/mt5-base'
+seed: 42
+n_gpus: 0
+
+train_args:
+    opt_level: 'O1'
+    train_batch_size: 16
+    eval_batch_size: 16
+    num_train_epochs: 3
+    max_seq_length: 512
+    learning_rate: 0.0003
+    weight_decay: 0.0
+    adam_epsilon: 0.00000001
+    warmup_steps: 0
+    gradient_accumulation_steps: 8
